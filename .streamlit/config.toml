@@ -1,0 +1,26 @@
+# ---------------------------------------------------------------------------
+# Streamlit configuration - Police Intelligence and Information Management
+# System (PIIMS), Nigeria Police Force, Oji-River Area Command.
+#
+# Streamlit reads this file automatically when the app starts, so the command
+# colours and the upload limit are applied without extra configuration on the
+# presentation computer.
+# ---------------------------------------------------------------------------
+
+[theme]
+primaryColor = "#0b2545"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f5f7fa"
+textColor = "#1b1b1b"
+font = "sans serif"
+
+[server]
+headless = false
+maxUploadSize = 10
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+showErrorDetails = true

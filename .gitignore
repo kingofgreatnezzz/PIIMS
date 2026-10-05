@@ -1,0 +1,36 @@
+# ---------------------------------------------------------------------------
+# PIIMS - Police Intelligence and Information Management System
+# Nigeria Police Force, Oji-River Area Command
+#
+# Files that must NOT be committed to GitHub.
+# ---------------------------------------------------------------------------
+
+# Virtual environment (recreated automatically by setup_and_start.bat)
+venv/
+.venv/
+env/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Dependency installation marker written by setup_and_start.bat
+.deps_ok
+
+# Scratch folder used during development - safe to delete at any time
+.tmp/
+
+# Streamlit secrets - NEVER commit real credentials
+.streamlit/secrets.toml
+
+# Editor and operating system clutter
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini
+
+# Note: police_ims.db and the photos/ folder ARE committed deliberately so that
+# the online demonstration opens with the Oji-River sample data already loaded.
+# Add them here if you would rather not publish the sample records.

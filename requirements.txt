@@ -1,0 +1,16 @@
+# ---------------------------------------------------------------------------
+# Police Intelligence and Information Management System (PIIMS)
+# Nigeria Police Force - Oji-River Area Command
+#
+# Install with:   pip install -r requirements.txt
+# Python 3.10 or newer is required.
+# ---------------------------------------------------------------------------
+streamlit>=1.36.0
+pandas>=2.0.0
+Pillow>=10.0.0
+
+# Everything else used by this project ships with Python itself:
+#   sqlite3   - database engine
+#   hashlib   - password hashing (PBKDF2-HMAC-SHA256)
+#   datetime  - date handling
+#   base64    - embedding suspect photographs in tables
