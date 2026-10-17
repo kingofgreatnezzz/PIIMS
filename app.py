@@ -410,6 +410,35 @@ def remove_photo_file(relative_path: Any) -> None:
             pass
 
 
+def save_case_photo(uploaded_file: Any, case_id: int) -> Optional[str]:
+    """
+    Store a photograph attached to a CASE FILE in ``photos/`` using Pillow.
+
+    This is the case-level evidence picture (a photograph of the scene, the
+    recovered property or the exhibit) and is deliberately separate from the
+    suspect's own photograph.  The image is converted to RGB, resized so its
+    longest side is at most 900 px and written as JPEG.  Returns the
+    project-relative path stored in ``cases.photo_path``.
+    """
+    if uploaded_file is None:
+        return None
+    try:
+        uploaded_file.seek(0)
+        image = Image.open(uploaded_file)
+        image.load()
+    except Exception as error:
+        raise ValueError(f"That file could not be read as an image ({error}).") from error
+
+    image = image.convert("RGB")
+    image.thumbnail((900, 900), Image.Resampling.LANCZOS)
+
+    db.ensure_photos_dir()
+    filename = f"case_{int(case_id):04d}_{int(time.time())}.jpg"
+    full_path = os.path.join(db.PHOTOS_DIR, filename)
+    image.save(full_path, "JPEG", quality=86, optimize=True)
+    return f"photos/{filename}"
+
+
 # --------------------------------------------------------------------------- #
 #  Lookup helpers - build label -> id maps for the select boxes
 # --------------------------------------------------------------------------- #
@@ -533,6 +562,19 @@ def _perform_delete(pending: dict[str, Any], cascade: bool) -> str:
     if table == "users":
         auth.delete_user(value)
         return f"User account '{pending['label']}' has been deleted."
+
+    # Remove any photograph held on disk BEFORE the row disappears, otherwise
+    # the file would be orphaned in photos/ with nothing pointing at it.
+    if table in ("cases", "suspects"):
+        try:
+            photo_row = db.fetch_one(
+                f"SELECT photo_path FROM {table} WHERE "
+                f"{'case_id' if table == 'cases' else 'suspect_id'} = ?", (value,))
+            if photo_row and photo_row["photo_path"]:
+                remove_photo_file(photo_row["photo_path"])
+        except Exception:  # noqa: BLE001 - never block the deletion itself
+            pass
+
     removed = db.delete_record(table, value, cascade=cascade)
     return f"{db.TABLE_LABELS.get(table, 'Record')} deleted successfully ({removed} row(s) removed)."
 
@@ -650,6 +692,8 @@ def cases_frame(
                COALESCE(o.name, 'Unassigned') AS "Investigating Officer",
                o.officer_number AS "Officer No.",
                c.status AS "Status", c.date_filed AS "Date Filed",
+               CASE WHEN c.photo_path IS NOT NULL AND c.photo_path <> ''
+                    THEN '📷 Attached' ELSE '-' END AS "Photo",
                c.description AS "Description"
         FROM cases c
         LEFT JOIN suspects s ON s.suspect_id = c.suspect_id
@@ -669,7 +713,9 @@ def cases_frame(
     if crime_types:
         sql += f" AND c.crime_type IN ({','.join('?' * len(crime_types))})"
         params.extend(crime_types)
-    sql += " ORDER BY c.date_filed DESC, c.case_number DESC"
+    # Newest first.  case_id is the final tiebreaker so a case that was just
+    # added always appears at the TOP of the register, never lost in the middle.
+    sql += " ORDER BY c.date_filed DESC, c.case_number DESC, c.case_id DESC"
 
     rows = db.rows_to_dicts(db.fetch_all(sql, tuple(params)))
     frame = pd.DataFrame(rows)
@@ -1024,8 +1070,10 @@ def _case_view_tab() -> None:
     case_id = options[label]
     row = db.fetch_one(
         """
-        SELECT c.*, s.name AS suspect_name, s.sex, s.address, s.occupation, s.age,
-               s.height, s.photo_path,
+        SELECT c.case_id, c.case_number, c.crime_type, c.description, c.status,
+               c.date_filed, c.photo_path AS case_photo_path,
+               s.name AS suspect_name, s.sex, s.address, s.occupation, s.age,
+               s.height, s.photo_path AS suspect_photo_path,
                o.name AS officer_name, o.officer_number, o.rank, o.department
         FROM cases c
         LEFT JOIN suspects s ON s.suspect_id = c.suspect_id
@@ -1078,10 +1126,17 @@ def _case_view_tab() -> None:
             else:
                 st.caption("No arrest has been recorded against this case.")
         with detail_right:
-            photo = photo_data_uri(row["photo_path"])
+            st.markdown("**📷 Case photograph**")
+            case_photo = photo_data_uri(row["case_photo_path"])
+            if case_photo:
+                st.image(case_photo, width=260)
+            else:
+                st.info("No case photograph attached. Use ✏️ Edit Case File to add one.")
+
             st.markdown("**Suspect photograph**")
+            photo = photo_data_uri(row["suspect_photo_path"])
             if photo:
-                st.image(photo, width=220)
+                st.image(photo, width=200)
             else:
                 st.info("No photograph on file for this suspect.")
 
@@ -1120,9 +1175,17 @@ def _case_add_tab() -> None:
             placeholder="State the circumstances of the offence, the property involved and any "
                         "material evidence recovered...",
         )
+        case_photo = st.file_uploader(
+            "📷 Photograph of the case (optional)",
+            type=["jpg", "jpeg", "png", "webp"],
+            key=f"{version}_photo",
+            help="Attach a picture of the scene, the recovered property or the exhibit. "
+                 "It is stored in photos/ and shown on the case file.",
+        )
         submitted = st.form_submit_button("💾 Save Case File", type="primary", **STRETCH)
 
     if not submitted:
+        _case_saved_panel()
         return
 
     if not case_number.strip():
@@ -1135,8 +1198,9 @@ def _case_add_tab() -> None:
         st.error(f"Case number '{case_number.strip()}' already exists. Use a unique case number.")
         return
 
+    photo_note = ""
     try:
-        db.execute_query(
+        new_case_id = db.execute_query(
             "INSERT INTO cases (case_number, suspect_id, officer_id, crime_type, description, "
             "status, date_filed) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
@@ -1153,9 +1217,71 @@ def _case_add_tab() -> None:
         st.error(f"Could not save the case file: {error}")
         return
 
+    # ---- attach the photograph (optional) -------------------------------- #
+    if case_photo is not None:
+        try:
+            stored = save_case_photo(case_photo, int(new_case_id))
+            if stored:
+                db.execute_query("UPDATE cases SET photo_path = ? WHERE case_id = ?",
+                                 (stored, int(new_case_id)))
+                photo_note = " with a photograph"
+        except ValueError as error:
+            st.warning(f"The case was saved, but the photograph was not: {error}")
+
     bump("form_version_case_add")
-    flash("success", f"Case file {case_number.strip()} was created successfully.")
+    st.session_state["last_saved_case_id"] = int(new_case_id)
+    flash("success", f"Case file {case_number.strip()} was created{photo_note} "
+                     f"and now appears in the case register.")
     st.rerun()
+
+
+def _case_saved_panel() -> None:
+    """
+    Show the case that was just created.
+
+    Streamlit cannot programmatically switch ``st.tabs``, so after saving the
+    operator stays on this tab.  That made a newly added case look as though it
+    had not been recorded at all.  This panel proves it was saved, shows the
+    record, and says exactly where to find it.
+    """
+    case_id = st.session_state.get("last_saved_case_id")
+    if not case_id:
+        return
+    row = db.fetch_one("SELECT * FROM cases WHERE case_id = ?", (int(case_id),))
+    if not row:
+        return
+    total = db.count_rows("cases")
+
+    left, right = st.columns([2, 1])
+    with left:
+        st.success(
+            f"✅ **Case file {row['case_number']} is saved.** It is now the newest entry "
+            f"in the register — open the **📋 View & Search** tab above to see all "
+            f"{total} case files, search it, or export it to CSV."
+        )
+        st.markdown(
+            f"""
+            <div class="npf-card">
+              <h4>🆕 {esc(row['case_number'])} — {esc(row['crime_type'])}
+                  {status_pill(row['status'])}</h4>
+              <div class="meta"><strong>Date filed:</strong> {esc(fmt_date(row['date_filed']))}</div>
+              <div class="meta"><strong>Description:</strong>
+                  {esc((row['description'] or '')[:260])}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with right:
+        photo = photo_data_uri(row["photo_path"])
+        st.markdown("**Case photograph**")
+        if photo:
+            st.image(photo, width=240)
+        else:
+            st.info("No photograph attached to this case.")
+
+    if st.button("✖️ Dismiss this confirmation", key="case_saved_dismiss"):
+        st.session_state.pop("last_saved_case_id", None)
+        st.rerun()
 
 
 def _case_edit_tab() -> None:
@@ -1206,6 +1332,22 @@ def _case_edit_tab() -> None:
             "Brief facts of the case", value=row["description"] or "", height=120,
             key=f"ce_desc_{case_id}",
         )
+        existing_photo = photo_data_uri(row["photo_path"])
+        if existing_photo:
+            st.markdown("**Current case photograph**")
+            st.image(existing_photo, width=260)
+        replace_photo = st.file_uploader(
+            "📷 Replace the case photograph (optional)",
+            type=["jpg", "jpeg", "png", "webp"],
+            key=f"ce_photo_{case_id}",
+            help="Upload a new picture to replace the current one. "
+                 "Leave empty to keep the photograph that is already attached.",
+        )
+        remove_photo = st.checkbox(
+            "🗑️ Remove the photograph from this case",
+            value=False, key=f"ce_rmphoto_{case_id}",
+            disabled=not bool(row["photo_path"]),
+        )
         submitted = st.form_submit_button("💾 Update Case File", type="primary", **STRETCH)
 
     if submitted:
@@ -1232,6 +1374,21 @@ def _case_edit_tab() -> None:
                     case_id,
                 ),
             )
+            # ---- case photograph ----------------------------------------- #
+            if remove_photo and row["photo_path"]:
+                remove_photo_file(row["photo_path"])
+                db.execute_query("UPDATE cases SET photo_path = NULL WHERE case_id = ?",
+                                 (case_id,))
+            if replace_photo is not None:
+                try:
+                    stored = save_case_photo(replace_photo, int(case_id))
+                    if stored:
+                        remove_photo_file(row["photo_path"])
+                        db.execute_query("UPDATE cases SET photo_path = ? WHERE case_id = ?",
+                                         (stored, case_id))
+                except ValueError as error:
+                    st.warning(f"The case was updated, but the new photograph was not saved: {error}")
+
             flash("success", f"Case file {case_number.strip()} was updated.")
             st.rerun()
 

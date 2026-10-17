@@ -233,6 +233,19 @@ def _login(app, username: str, password: str):
     return app
 
 
+def ss_get(app: Any, key: str, default: Any = None) -> Any:
+    """
+    Read a Streamlit session_state key without relying on ``.get()``.
+
+    AppTest's session_state proxy only supports ``[]`` indexing - calling
+    ``.get()`` on it raises ``KeyError: st.session_state has no key "get"``.
+    This wrapper keeps the assertions readable and version-independent.
+    """
+    try:
+        return app.session_state[key]
+    except Exception:
+        return default
+
 def test_streamlit_app() -> None:
     section("4. STREAMLIT APPLICATION (AppTest)")
     from streamlit.testing.v1 import AppTest
@@ -245,13 +258,13 @@ def test_streamlit_app() -> None:
 
     # ---- wrong credentials ---------------------------------------------- #
     app = _login(AppTest.from_file("app.py", default_timeout=180).run(), "admin", "wrong-password")
-    check(not app.session_state.get("auth_user"), "Invalid credentials do not create a session")
+    check(not ss_get(app, "auth_user"), "Invalid credentials do not create a session")
     check(any("Invalid username or password" in e.value for e in app.error),
           "Invalid credentials display an error message")
 
     # ---- administrator sign in ------------------------------------------ #
     app = _login(AppTest.from_file("app.py", default_timeout=180).run(), "admin", "admin123")
-    user = app.session_state.get("auth_user")
+    user = ss_get(app, "auth_user")
     check(bool(user) and user.get("role") == "Admin", "admin/admin123 signs in through the UI")
     check(not app.exception, "Dashboard renders without exception after sign-in")
     metric_labels = [m.label for m in app.metric]
@@ -347,12 +360,12 @@ def test_streamlit_app() -> None:
         "The confirmation dialog offers a Cancel button",
     )
     check(
-        app.session_state.get("pending_delete") is not None,
+        ss_get(app, "pending_delete") is not None,
         "The record is only queued for deletion, not yet removed",
     )
     [b for b in app.button if "Cancel" in b.label][0].click().run()
     check(
-        app.session_state.get("pending_delete") is None,
+        ss_get(app, "pending_delete") is None,
         "Cancel clears the pending deletion",
     )
     check(db.count_rows("cases") == cases_before + 1, "Cancelling the dialog changed nothing")
@@ -382,7 +395,7 @@ def test_streamlit_app() -> None:
     viewer_app = _login(
         AppTest.from_file("app.py", default_timeout=180).run(), "viewer", "viewer123"
     )
-    viewer_user = viewer_app.session_state.get("auth_user")
+    viewer_user = ss_get(viewer_app, "auth_user")
     check(bool(viewer_user) and viewer_user.get("role") == "Viewer", "viewer/viewer123 signs in")
 
     viewer_app.session_state["nav_page"] = "Case Files"
@@ -422,7 +435,7 @@ def test_streamlit_app() -> None:
     viewer_app.session_state["nav_page"] = "Dashboard"
     viewer_app.run()
     [b for b in viewer_app.button if "Sign Out" in b.label][0].click().run()
-    check(not viewer_app.session_state.get("auth_user"), "Sign Out clears the session")
+    check(not ss_get(viewer_app, "auth_user"), "Sign Out clears the session")
 
 
 # --------------------------------------------------------------------------- #

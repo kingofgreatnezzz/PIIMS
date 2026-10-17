@@ -82,7 +82,8 @@ CREATE TABLE IF NOT EXISTS cases (
     crime_type  TEXT    NOT NULL,
     description TEXT,
     status      TEXT    NOT NULL CHECK(status IN ('Open', 'Under Investigation', 'Closed')),
-    date_filed  DATE    NOT NULL
+    date_filed  DATE    NOT NULL,
+    photo_path  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS arrests (
@@ -356,6 +357,36 @@ def delete_record(table: str, pk_value: int, cascade: bool = False) -> int:
 # --------------------------------------------------------------------------- #
 #  Schema creation / reset
 # --------------------------------------------------------------------------- #
+#: Columns added after the first release.  ``CREATE TABLE IF NOT EXISTS`` does
+#: not add columns to a table that already exists, so an existing database is
+#: brought up to date by the ALTER TABLE statements in _apply_migrations().
+LATE_COLUMNS: list[tuple[str, str, str]] = [
+    # (table, column, SQL type)
+    ("cases", "photo_path", "TEXT"),
+]
+
+
+def _apply_migrations(conn: sqlite3.Connection, verbose: bool = False) -> None:
+    """
+    Add any column that an older database is missing.
+
+    Safe to run on every start: each column is only added when it is genuinely
+    absent, so existing case files and photographs are never disturbed.
+    """
+    for table, column, sql_type in LATE_COLUMNS:
+        try:
+            existing = {
+                row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+        except sqlite3.Error:
+            continue
+        if existing and column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
+            conn.commit()
+            if verbose:
+                print(f"[db] Migration: added {table}.{column}")
+
+
 def init_db(verbose: bool = False) -> None:
     """Create every table, index and the ``photos/`` directory if missing."""
     ensure_photos_dir()
@@ -363,6 +394,7 @@ def init_db(verbose: bool = False) -> None:
     try:
         conn.executescript(SCHEMA_SQL)
         conn.commit()
+        _apply_migrations(conn, verbose=verbose)
         if verbose:
             print("[db] Schema verified - all tables are present.")
     finally:
